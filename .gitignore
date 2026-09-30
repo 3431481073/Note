@@ -1,0 +1,29 @@
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+*.log
+.DS_Store
+
+# ── 敏感面兜底（发布协议要求）─────────────────────────────────
+# 发布前实测：本仓库当前**没有**这些文件。以下是防御性的。
+# 便签的 SQLite 库由 Tauri 写在 appDataDir（仓库之外），这几条是防止
+# 有人在项目里跑调试把库或密钥落进来。
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+data/
+models/
+browser_data/
+
+# ── 编辑器 / 系统 ────────────────────────────────────────────
+__pycache__/
+.idea/
+.vscode/
+Thumbs.db

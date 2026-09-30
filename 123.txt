@@ -1,0 +1,496 @@
+# 便签 UI 界面与交互规格 v12（改进版 · 导出文档）
+
+> 用途：在别处 **1:1 复现**这套「便签 v12」界面的**外观 + 交互 + 数据呈现**。
+> 本文是 **原「便签」规格（v1）** 的**升级版**：在保留原有「纸张 + 卡片列 + 回收站」双栏结构的同时，**新增**「视图（结构树）模式」「标签 / 项目过滤」「节点导入卡片」三块能力。
+> 基准代码：单文件 `index.html`（HTML + CSS + 原生 JS），无构建依赖。
+> **与原版兼容**：卡片模式下的所有组件（纸张、搜索框、卡片、底部按钮、关闭按钮、确认框）均已按原规格对齐，可互换。
+
+---
+
+## 1. 窗口壳（Shell）
+
+本版本运行在**浏览器 / WebView** 中，窗口壳由宿主决定；下面的 **Stage** 就是原版「面板 `.panel`」的等价物。
+
+| 属性 | 值 | 说明 |
+| --- | --- | --- |
+| Stage 尺寸 | **1300 × 560** | 逻辑像素 |
+| 圆角 / 外框 | 22px | 由 `.stage::before` 自绘黑底 |
+| 背景 | `#050608` | `.stage::before` 底色 |
+| 边框 | `1px solid rgba(255,255,255,.06)` | 极淡白描边 |
+| 阴影 | `0 40px 90px -30px rgba(0,0,0,.9)` + `inset 0 1px 0 rgba(255,255,255,.03)` | 大悬浮 + 顶部内高光 |
+| 透视 | `perspective: 2400px`，`perspective-origin: 50% 50%` | 供视图切换的 3D 折叠使用 |
+| 舞台外背景 | `radial-gradient(circle at 50% 42%, #1a2033 0%, #0a0c15 76%)` | 深色环境光 |
+| 缩放 | `≤1360px → scale(.82)`；`≤1120px → scale(.68)` | 响应式等比缩放 |
+| 隐藏/显示 | 关闭按钮 → `opacity 0 → display:none`；显示 `launcher` 按钮后反向恢复 | 对应原版 `hide()` / `show()` |
+
+**显示时机**：`boot()` 完成后渲染首帧，若上次会话为 `card` 模式走 `resetToCard()`，若为 `outline` 模式直接落到树视图（先渲染 + 80ms 后 `renderTree()` 以等布局稳定）。
+
+**关闭**：淡出 + `scale(0.94)`（220ms），然后 `display:none`，露出 `launcher`「显示便签」按钮（磨砂玻璃胶囊）。
+
+---
+
+## 2. 布局总览
+
+```
+┌────────────────────────────────────────────────────────────┐  ← Stage 1300×560
+│                                                            │
+│  [卡片模式]                                                 │
+│  ┌────────────┐              ┌──────────────────┐          │
+│  │ paper-col  │              │ card-col         │          │
+│  │ 382×520    │              │ 226 宽           │          │
+│  │ left:340   │              │ left:734         │          │
+│  │ rotate     │              │ ┌──────────────┐ │          │
+│  │ -0.6°      │              │ │ seg 分段控件  │ │          │
+│  │            │              │ ├──────────────┤ │          │
+│  │  纸张       │              │ │ search 38    │ │          │
+│  │            │              │ │ (+filters)   │ │          │
+│  │            │              │ ├──────────────┤ │          │
+│  │            │              │ │ card-list    │ │          │
+│  │            │              │ │ (虚拟高度)    │ │          │
+│  │            │              │ ├──────────────┤ │          │
+│  │            │              │ │ card-foot 32 │ │          │
+│  │            │              │ └──────────────┘ │          │
+│  └────────────┘              └──────────────────┘          │
+│                                                            │
+│  [视图模式]                                                 │
+│  ┌───────────────┐  ┌──────────────┐  ┌─────────────────┐  │
+│  │ outline-col   │  │ card-col     │  │ content-col     │  │
+│  │ 550×520       │  │ 226 宽       │  │ 400×520         │  │
+│  │ left:50       │  │ left:612     │  │ left:850        │  │
+│  │ 结构树         │  │ 同上          │  │ 节点内容面板     │  │
+│  └───────────────┘  └──────────────┘  └─────────────────┘  │
+│                                                            │
+│  [关闭按钮] 顶部右侧，浮出（top:10 right:10）                │
+└────────────────────────────────────────────────────────────┘
+```
+
+**关键尺寸表**：
+
+| 元素 | 宽 × 高 | 位置/备注 |
+| --- | --- | --- |
+| Stage | 1300 × 560 | |
+| 各列 `.paper-col / .card-col / .outline-col / .content-col` | 高 520，`top:20` | 绝对定位 |
+| 纸面 `.paper-col` | 382 | `left:340`（卡片模式） |
+| 卡片列 `.card-col` | 226 | `left:734`（卡片模式）/ `left:612`（视图模式） |
+| 结构树 `.outline-col` | 550 | `left:50`（仅视图模式） |
+| 内容面板 `.content-col` | 400 | `left:850`（仅视图模式） |
+| 纸张 `.paper` | 382 × 520 | 圆角 14，`rotate(-0.6deg)` |
+| 分段控件 `.seg` | 226 × 32 | 每格 26 高，3px 内边距 |
+| 搜索框 `.search` | 226 × 32 | 圆角 10 |
+| 卡片列表 `.card-list` | 226 × 剩余 | 隐藏滚动条 |
+| 单张卡片 `.card` | 226 × 最小 84 | 内边距 11/12 |
+| 底部 `.card-foot` | 226 × 32 | 两按钮 `gap:8` |
+| 结构树 `.outline-inner` | 550 × 520 | 圆角 16 |
+| 内容面板 `.content-inner` | 400 × 520 | 圆角 16，内边距 18/20 |
+
+---
+
+## 3. 视觉主题（设计 Tokens）
+
+原版 token 全部保留，本版新增一组**视图/节点/标签**专用色。全部定义在 `:root`（等价地把原规格直接照搬即可）：
+
+```css
+/* ——— 原版核心 token（未改动） ——— */
+--ink-current: #64748b;   /* 主墨色（蓝灰） */
+--text:        #263238;   /* 正文近黑 */
+--paper-bg:    #ffffff;   /* 纸张纯白 */
+--paper-bg2:   #f6f9fc;   /* 纸张底部极浅冷色 */
+--paper-line:  #eef2f7;   /* 纸面横线 */
+--card-bg:     #ffffff;   /* 卡片纯白 */
+--card-border: #e6ebf2;   /* 卡片描边冷灰 */
+--trash-card-bg:#f2f5f9;  /* 回收站卡片浅灰 */
+--trash-text:  #94a3b8;   /* 回收站文字灰蓝 */
+--accent:      #2dd4bf;   /* 薄荷青（强调/流光/角标/高亮） */
+--danger:      #ef4444;   /* 删除红 */
+
+/* ——— v12 新增 token（语义名，值直接取自代码） ——— */
+--mint-deep:   #17a394;   /* 薄荷青悬停文字 */
+--mint-ink:    #0f766e;   /* 薄荷青深色（用于 chip 文字） */
+--proj:        #4f46e5;   /* 项目紫（chip / badge） */
+--view-tag:    #b45309;   /* 「视图：」标签的琥珀色 */
+--node-root-bg:#e2fbf3;   /* 根节点浅薄荷底 */
+--node-active-bg:#e5fbf6; /* 活跃节点浅薄荷底 */
+--tree-line:   #94a3b8;   /* 树连线灰 */
+--tree-dot-bg: rgba(148,163,184,0.32); /* 树网格点阵 */
+--content-bg:  #fbfcfe;   /* 内容面板浅冷白 */
+--outline-bg:  #f1f5f9;   /* 结构树整体底色 */
+```
+
+- 全局字体：`-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`，抗锯齿。
+- 主题延续「清爽冷色」：纸/卡纯白、描边冷灰、强调薄荷青、**没有泛黄**（原版约定保持不变）。
+- 视图模式的次要色（紫 / 琥珀）是为区分「项目 / 视图标签」引入的扩展色，不与原版冲突。
+
+---
+
+## 4. 组件清单
+
+### 4.1 纸张 `Paper`（左栏主体，**与原版 1:1 对齐**）
+
+- 结构：`.paper` 内三层
+  1. `.paper-meta`（v12 新增）：顶部一行 `标签 🏷` + `项目 📁` 两个下拉触发器 + 已选 chips 行。
+  2. `.paper-title`（v12 新增）：可选的标题输入框，`16px / 600`，占位「标题（可选）」。
+  3. `.paper-body` + `textarea.editor`：正文，**15px / 行高 28px**，无边框无 outline 不可 resize，透明背景 + **每 28px 一条横线**（`repeating-linear-gradient`），占位符「写点什么…」。
+- 外观：`linear-gradient(180deg, #fff, #f6f9fc)` 底色，圆角 14，整体 `rotate(-0.6deg)`，大阴影 `0 18px 40px rgba(0,0,0,.12)`。
+- **日期 `.paper-date`**：绝对定位 `right:20 / top:14`，`font-size:11px / color: #64748b`，格式 `YYYY.MM.DD HH:mm`，内容为 `updated_at || created_at`。
+- 状态：
+  - 有页：可编辑。
+  - 无页：标题空、正文空、日期空，仅显示占位符。
+  - **搜索中 / 回收站**：`readOnly = true`，正文颜色变为 `#6b7a8d`（`.editor.preview`）。
+
+### 4.2 分段控件 `Seg`（v12 新增，卡片列顶部）
+
+- 结构：`.seg` 内含两个 `.seg-btn`：`卡片` / `视图`。
+- 外观：`226×32`，圆角 11，`background:#e9eef5`，内边距 3。每格 `height:26`，`border-radius:8`，字号 12。
+- 状态：
+  - 未选：`color:#7d8b9d`，透明底。
+  - 选中：白底 + 薄荷青字 `#17a394` + 600 字重 + `box-shadow: 0 2px 6px -2px rgba(15,23,42,.22)`。
+- 点击行为：切换 `card` / `outline` 模式，触发一整套 3D 折叠过渡（见 §8）。
+
+### 4.3 搜索框 `SearchBar`（右栏顶部，**与原版 1:1 对齐**）
+
+- 结构：`.search` 包裹搜索图标 + `<input>`，占位符「**搜索便签…**」，13px，`color: #263238`。
+- 外观：`226×32`，圆角 10，白底（`rgba(255,255,255,.95)`），`border:1px solid #e6ebf2`。
+- **光带状态**（与原版一致）：
+  - `:focus-within` 时，`::before` / `::after` 各一个旋转 conic-gradient（`from var(--halo)`，3.2s 一圈，双环相位差 1.2s），只留描边环（`mask-composite: exclude`），附加 `box-shadow:0 0 12px rgba(45,212,191,.25)` 光晕。
+  - 边框变透明，背景变纯白，图标色变 `--accent`。
+- **搜索过滤器 `.search-filters`**（v12 新增）：`focus` 时 `.show` 展开，包含 `🏷 标签` / `📁 项目` 两个下拉 + 已选 chips 行。
+
+### 4.4 卡片列表 `CardList` + 卡片 `Card`（右栏中部）
+
+- 滚动容器 `.card-list`：226 宽，`overflow-y:auto`，**滚动条三端全隐藏**（`scrollbar-width:none` + `-ms-overflow-style:none` + `::-webkit-scrollbar{display:none}`）。
+- 卡片 `.card`（最小高度 **84**）结构：
+  - `.card-head`：`[图标] [标题] ……… [日期]`，右内边距 22（回收站 50）。
+  - `.card-sum`：摘要（空则「**（空白便签）**」），**12px / 行高 16px**，**最多 2 行**（`-webkit-line-clamp:2`）。
+  - `.card-tags`（v12 新增）：最多 3 个 tag chip（`视图：` 琥珀 → 项目 紫 → 普通 薄荷），高度 16，字号 10。
+  - 动作按钮（右上角，22×22，圆角 7，透明底，hover 才显现）：
+    - **便签页**：`✕` 删除（`.danger` hover 红底）。
+    - **回收站**：`↩` 恢复 + `🗑` 彻底删除（后者 hover 红底）。
+- **卡片状态**：
+  - **普通**：白底、`border:1.5px` 灰边、浅阴影。
+  - **活跃**：`border-color:transparent`，双层背景（内层纯白 padding-box + 外层旋转 conic 作为 border-box），`animation: haloSpin 3s linear infinite`，`box-shadow: 0 8px 22px -12px rgba(45,212,191,.95)`。
+  - **滚动时**：`.card-list.scrolling .card.active { animation-play-state: paused }`（220ms 后恢复）。
+  - **回收站卡片 `.is-trash`**：`background:#f2f5f9`、`border-color:#e3e9f1`、文字 `#94a3b8`。
+- 分页：列表底部「**加载更多（还有 N 条）**」按钮，`height:34`，虚线描边 `#d7e0ec`，hover 变薄荷青。
+
+### 4.5 底部按钮 `BottomBar`（**与原版 1:1 对齐**）
+
+- 两个按钮，`height:32`，圆角 10，白底描边，`gap:8`：
+  - **`＋` 新建**（`.foot-btn.primary`，`flex:4 1 0`，约占 80%）：薄荷青渐变底、白字、18px、外发光。**只在便签页显示**，回收站视图由 `renderFoot()` 逻辑控制（保持渲染但语义切换）。
+  - **`🗑` 回收站 / `📝` 返回**（`.foot-btn:not(.primary)`，`flex:1 1 0`，约占 20%）：
+    - 便签页：显示 `🗑`，若 `trashCount > 0` 右上角有**薄荷青圆形角标**（数字，最多 `99+`）。
+    - 回收站：显示 `📝`（返回便签）。
+- hover：底 `#eef4f8`、描边变薄荷青 `#2dd4bf`、色变 `#17a394`、加薄荷青外发光。
+
+### 4.6 空状态 `EmptyState`（卡片列表区占位，**与原版文案一致**）
+
+- 居中文字，12px，`color:#b0bccb`，内边距 `58px 12px`：
+  - 便签页空：「还没有便签，点 ＋ 新建一条」
+  - 回收站空：「回收站是空的」
+  - 搜索无结果：「没有匹配的便签 / 视图」
+
+### 4.7 关闭按钮 `CloseButton`（**与原版一致**）
+
+- 28×28 圆形，`✕`，位于 Stage `top:10 right:10`，`z-index:30`。
+- 常态：`background:rgba(255,255,255,.06)`、`border:1px solid rgba(255,255,255,.08)`、色 `#94a3b8`。
+- hover：`background:#f0e9da`、色 `#475569`、`transform: scale(1.08)`。
+
+### 4.8 确认框 `TrashConfirm`（模态，**与原版一致**）
+
+- 全窗遮罩 `.modal-mask`（`rgba(0,0,0,.18)`），居中白卡 **300px**：
+  - 标题「**彻底删除？**」（15px / 700 / `#263238`）
+  - 描述「**删除后不可恢复。**」（13px / 行高 20 / `#64748b`）
+  - 按钮：`取消`（透明，hover `#f5f8fc`）/ `彻底删除`（`--danger` `#ef4444` 红底白字，hover `#dc2626`）。
+- 点遮罩或 `Esc` 关闭；点「彻底删除」执行 `purgePage(id)` 并关闭。
+
+### 4.9 结构树 `OutlineTree`（v12 新增）
+
+- 容器 `.outline-inner`：**550×520**，`background:#f1f5f9`，圆角 16，`border:1px solid #e2e9f1`。
+- 头部 `.outline-head`：`12px 16px 10px` 内边距，`background:#f8fafc`，含标题「**结构视图**」(11.5 / 600 / 大写 / 字间距 .6) + 提示「拖动节点调整 · 双击改名」+ 右上角 `＋`（`.mini-btn`，24×24，圆角 7）。
+- 画布 `.tree-canvas`：`overflow:auto`，点阵背景 `radial-gradient(circle, rgba(148,163,184,.32) 1px, transparent 1px)`，网格 22×22。
+- 节点 `.node-card`：`min-height:32`，`padding:0 10px`，`border:1.5px solid #dbe3ee`，圆角 10，字号 12.5，`cursor:grab`。
+  - `.root`：`border-color:#a7f3d0`、薄荷绿渐变底、`color:#0f766e / 600`。
+  - `.active`：`border-color:#2dd4bf`、浅薄荷渐变底、外发光。
+  - `.dragging`：`cursor:grabbing`、更深阴影、`z-index:10`。
+- 节点操作（hover 才出现，右侧渐变遮罩）：`＋` 加子节点 / `✕` 删除。
+- 标题双击进入 `contenteditable` 就地改名，`Enter` 提交，`Esc` 撤销。
+- 连线：贝塞尔曲线 `stroke:#94a3b8 / 1.5px`，端点两个 `r=3` 白底灰边圆点。
+
+### 4.10 内容面板 `NodeContent`（v12 新增）
+
+- 容器 `.content-inner`：**400×520**，`background:#fbfcfe`，圆角 16，`border:1px solid #e6ebf2`，内边距 `18px 20px`。
+- 头部 `.node-top`：`🏷 标签` / `📁 项目` 两个下拉 + 右侧 `＋ 卡片` 按钮（导入到便签列表）。
+  - `＋ 卡片` 常态：薄荷青描边 + 10% 底 + `#0f766e`。
+  - hover：变薄荷青渐变底 + 白字 + 外发光。
+  - 已导入：`.done`，20% 底 + 45% 描边 + 深薄荷字，文字变 `✓ 已添加`。
+- 已选 chips 行 `.selected-chips`：横向滚动，`scrollbar-width:none`。
+- 正文 `textarea.node-body`：`13.5px / 行高 22px`，圆角 10，透明底；hover 变 `#f8fafc`；focus 白底 + `1px #2dd4bf` + 3px 光晕。
+- 空态 `.content-empty`：居中文案「← 在左侧选择一个节点 / 内容会显示在这里」，`color:#b0bccb`。
+
+### 4.11 标签 / 项目下拉 `DropPanel`（v12 新增）
+
+- 触发器 `.drop-trigger`：高 26，圆角 8，白底描边，字号 11.5，右侧 `▾`；`.active` 时 `#2dd4bf` 描边 + `#f0fdfa` 底 + 2px 光晕。
+- 面板 `.drop-panel`：`top: calc(100% + 6px)`，最小宽 220，最大宽 280，白底圆角 12，`box-shadow: 0 18px 40px -16px rgba(0,0,0,.65)`，`popIn 0.16s` 弹出。
+- 选项 `.drop-opt`：胶囊（高 24 / 圆角 12），未选灰；选中 `.on` 用薄荷青渐变（项目用紫色渐变）。
+- 底部 `.drop-new`：`新建标签…` 输入框 + `添加` 按钮（Enter 提交，Esc 关闭）。
+
+### 4.12 弹窗 `Modal`（两个：添加节点 / 导入卡片）
+
+- 与 4.8 结构相同（遮罩、300px 白卡、`popIn` / `modalIn` 动画）。
+- 支持内嵌 `.modal-input`（36 高，圆角 9，focus 时薄荷青描边 + 3px 光晕）。
+- 「添加节点」：标题「添加节点 / 添加根节点」+ 输入框 + `取消 / 确定(primary)`。
+- 「添加到卡片列表」：标题 + 提示 + 输入框（可留空）+ `取消 / 确定(primary)`。
+
+### 4.13 Toast（v12 新增）
+
+- 底部居中：`bottom:30px`，`padding:8px 16px`，圆角 10，深色底 `rgba(20,28,40,.95)`，白字 12px。
+- 显示：`.show` 类切换，`opacity/transform` 过渡 0.24s；1.8s 后自动消失。
+
+### 4.14 Launcher（Stage 隐藏后的唤出按钮，v12 新增）
+
+- 磨砂玻璃胶囊，`padding:12px 22px`，圆角 14，`backdrop-filter: blur(12px)`，白 8% 底 + 白 16% 描边。
+- 文案「显示便签」，hover 提升到 15% 底。
+
+---
+
+## 5. 界面状态机
+
+| 状态 | 触发 | 纸张 | 卡片列表 | 底部 | 结构树/内容 |
+| --- | --- | --- | --- | --- | --- |
+| **启动浮现** | 打开页面 | 加载中 | 加载中 | — | 隐藏（`pointer-events:none`） |
+| **卡片模式·有内容** | 默认 | 可编辑 | active 列表，选中项流光 | `＋` + `🗑(角标)` | — |
+| **卡片模式·空** | 删光 | 空纸 | 「还没有便签，点 ＋ 新建一条」 | `＋` + `🗑` | — |
+| **回收站·有内容** | 点 🗑 | 当前回收项只读（灰） | trash 列表，灰卡 | `📝(返回)` | — |
+| **回收站·空** | 清空 | 空纸 | 「回收站是空的」 | `📝(返回)` | — |
+| **搜索中** | 搜索框有字 | 预览结果（只读） | 搜索结果列表 + 顶部 filters 展开 | 不变 | — |
+| **确认删除** | 点 🗑(回收站) | 不变 | 不变 | 遮罩 + 弹窗 | — |
+| **视图模式** | 点「视图」 | 折走（缩为 0） | 左移让位 | 变「新建视图」 | 结构树 + 内容面板展开 |
+| **视图-选中节点** | 单击树节点 | — | — | — | 内容面板显示该节点 + `＋ 卡片` 按钮 |
+| **视图-导入卡片** | 点 `＋ 卡片` | — | 生成一条带「视图：」标签的新便签 | — | 按钮变「✓ 已添加」 |
+
+**视图切换规则**：`toCard() / toOutline()` 全程 **杀掉所有动画 → 按时间轴重排**，`state.running=true` 期间忽略重复触发。切换时清空搜索、清空标签/项目过滤、`currentId` 重置、`activeNodeId` 置空。
+
+**排序**：`active` 按 `updatedAt` 降序；`trash` 按 `deletedAt` 降序。视图节点按 `created_at` 顺序、父节点在子节点上方。
+
+---
+
+## 6. 交互地图（动作 → 视觉反馈 → 状态/数据变化）
+
+| # | 区域 | 交互 | 立即视觉反馈 | 状态/数据变化 |
+| --- | --- | --- | --- | --- |
+| 1 | Stage | 打开页面 | 无（本版无浮现动画，直接渲染） | `boot()`：读 localStorage → 若无则 `seed()` → 选中第一条（空则新建一条空白） |
+| 2 | 纸张标题 | 输入 | 标题实时显示 | 乐观更新 `p.title`、`p.updatedAt`；300ms 防抖 `save()` |
+| 3 | 纸张正文 | 输入 | 正文实时显示，卡片摘要同步 | 乐观更新 `p.text`、`p.updatedAt`；`refreshCard(p)` 局部更新卡片 |
+| 4 | 卡片 | 单击 | 该卡亮起流光、纸张切到该便签 | `selectPage(id)`：`flushSave → setCurrent → render()` |
+| 5 | 底部 `＋` | 单击 | 新建卡片置顶、纸面聚焦 | `newPage()`：`makeNote(kind) → push → setCurrent → render` |
+| 6 | 卡片 `✕` | 单击 | 卡片从列表消失 | `trashPage(id)`：`p.deleted=true / deletedAt=now`；若删的是当前项，`ensureCurrent()` 补下一条 |
+| 7 | 回收站卡 `↩` | 单击 | 卡片从回收站消失 | `restorePage(id)`：`deleted=false`；**切回便签页并选中它**（本版行为，与原版「留在回收站」略有不同） |
+| 8 | 回收站卡 `🗑` | 单击 | 弹出确认框 | `askPurge(id)` → `modalMask.hidden=false` |
+| 8a | 确认框 `彻底删除` | 单击 | 弹窗关闭、卡片消失 | `purgePage(id)`：物理移除 + `ensureCurrent()` |
+| 8b | 确认框 `取消`/遮罩/Esc | 单击 | 弹窗关闭 | 无变化 |
+| 9 | 底部 `🗑`/`📝` | 单击 | 视图切换、角标变化 | `toggleView()`：切换 `state.view`，重新选第一条 |
+| 10 | 搜索框 | 输入 | 输入即显示；聚焦时 filters 展开 + 流光 | `state.query` 200ms 防抖；结果替换列表 |
+| 11 | 搜索结果卡片 | 单击 | 退出搜索、纸张打开该便签 | `selectPage(id)`（搜索清空由上层逻辑处理） |
+| 12 | 卡片列表 | 滚轮 | 滚动；滚动中流光暂停 | `data-scrolling="true"` 220ms 后恢复 |
+| 13 | 分段控件 | 单击 | 3D 折叠过渡 | `toCard()` / `toOutline()`，详见 §8 |
+| 14 | 纸张标签/项目 | 单击触发器 | 下拉面板弹出 | `openPanel('paperTag'/'paperProj')`，同时关闭其他 5 个 |
+| 15 | 标签/项目选项 | 单击 | `.on` 状态切换、chips 行更新 | 更新 `p.tags / p.projects` 数组 |
+| 16 | 新建标签 | 输入框 + Enter 或 点「添加」 | 选项立刻出现并已选中 | `customTags.push(v)` + 挂到当前页/节点 |
+| 17 | 视图节点 | 单击 | 亮起薄荷青边 + 内容面板切到它 | `state.activeNodeId = id`，`renderContent()` |
+| 18 | 视图节点 | 双击标题 | 进入 `contenteditable`，薄荷青高亮框 | `Enter` 提交 → `node.title = v`；`Esc` 撤销 |
+| 19 | 视图节点 | 拖动 | 卡片浮起 + 连线实时跟随 | `node.x/y` 更新；`scheduleSave()` |
+| 20 | 视图节点 `＋` | 单击 | 弹「添加节点」模态 | `openNodeAddModal(id, 'child')` |
+| 21 | 视图头部 `＋` | 单击 | 弹「添加根节点」模态 | `openNodeAddModal('root', 'root')` |
+| 22 | 视图节点 `✕` 或 Delete | 单击 / 按键 | 节点消失、连线重绘 | `deleteNode(id)` |
+| 23 | 内容面板 `＋ 卡片` | 单击 | 按钮变「✓ 已添加」+ toast | 生成带「视图：xxx」标签的新便签；已导入则**撤销**（从便签列表移除） |
+| 24 | 关闭 `✕` | 单击 | Stage 淡出+缩小，露出 launcher | `display:none` + `launcher.hidden=false` |
+| 25 | Launcher | 单击 | Stage 恢复 | 反向恢复；视图模式额外 `renderTree()` |
+| 26 | 全局 `Ctrl/Cmd+F` | 键盘 | 聚焦搜索框并全选 | 阻止默认行为 |
+| 27 | 全局 `Delete/Backspace` | 键盘 | 仅视图模式下删除选中节点 | 编辑域内不触发 |
+| 28 | 全局 `Esc` | 键盘 | 依次：关弹窗 → 关节点模态 → 关导入模态 → 关下拉 → 清空搜索 | 逐级降级处理 |
+| 29 | 卡片动作按钮 | Tab/键盘 | 不可聚焦（`tabIndex=-1`） | 只留鼠标，防误触 |
+| 30 | 各按钮 | hover | 底色/描边变化 | 见 §4 各组件 hover |
+
+---
+
+## 7. 数据模型（驱动 UI 的数据）
+
+```ts
+type Mode  = "card" | "outline";      // 分段控件决定
+type View  = "notes" | "trash";       // 底部按钮决定
+
+interface Page {
+  id: string;
+  kind: "note" | "outline";           // note=便签，outline=视图（带树）
+  title: string;
+  text: string;                       // note 用；outline 一般为空
+  tags: string[];                     // 便签：普通标签；视图：可含 "视图：xxx"
+  projects: string[];                 // 项目归属
+  nodes: Node[];                      // 仅 outline 用
+  fromView?: string;                  // 由视图导入的便签会记下来源
+  createdAt: number;                  // 毫秒时间戳
+  updatedAt: number;                  // 纸面日期 / 卡片排序用
+  deleted: boolean;
+  deletedAt: number;                  // 非 0 即在回收站
+}
+
+interface Node {
+  id: string;
+  title: string;
+  text: string;
+  tags: string[];
+  projects: string[];
+  addedToNotes: boolean;              // 是否已导入为便签
+  noteId: string | null;              // 导入后生成的便签 id
+  collapsed: boolean;
+  x: number; y: number;               // 布局 / 拖动后的绝对坐标
+  _w: number; _h: number;             // 测量缓存（渲染时更新）
+  children: Node[];
+}
+```
+
+**Store 单一数据源**（`state`）：
+
+```ts
+pages: Page[];                        // 全量（含回收站）
+projects: string[];                   // 项目候选
+customTags: string[];                 // 用户新建的标签候选
+currentId: string | null;             // 当前便签 id（卡片模式）
+view: "notes" | "trash";
+mode: "card" | "outline";
+query: string;                        // 搜索词
+activeTags: string[];                 // 搜索过滤（多选 AND）
+activeProjects: string[];             // 搜索过滤（多选 OR 于项目内）
+visible: number;                      // 「加载更多」已展开条数（默认 30）
+activeNodeId: string | null;          // 视图模式选中的节点
+running: boolean;                     // 模式切换动画互斥锁
+```
+
+**派生**：
+- `visiblePages()` —— 当前 kind + view 下，经 `query / activeTags / activeProjects` 过滤，再按规则排序。
+- `previewPage()` —— 搜索中 → 取第一条命中；否则 → `currentPage()`。
+- `titleOf(p)` —— outline 若无 title 则回落到 `nodes[0].title`。
+- `summaryOf(p)` —— note 取正文前 90 字；outline 取「N 个节点」。
+- `currentKind()` —— `mode === 'card' ? 'note' : 'outline'`。
+
+**持久化**：`localStorage` key = `notes-ui-v12-aligned`，只存 `{ pages, projects, customTags, currentId, mode }`，300ms 防抖写入，`beforeunload` 强制 flush。
+
+**种子数据**：冷启动调用 `seed()`：
+- 6 条便签（含 1 条无标题、多标签、含项目）。
+- 1 条回收站便签（`deleted:true`）。
+- 1 条视图（`kind:'outline'`），含 4 个根节点 + 若干子节点。
+
+**排序规则**：
+- 便签页：按 `updatedAt` 降序。
+- 回收站：按 `deletedAt` 降序。
+- 视图节点：同一父节点下按 `children` 数组顺序。
+
+---
+
+## 8. 动画 / 动效清单
+
+| 动效 | 触发 | 实现要点 |
+| --- | --- | --- |
+| 卡片流光 | 活跃卡片 | `@property --halo` + 双 `conic-gradient` 作为 `background` 的 `border-box` 层，`haloSpin 3s` 匀速 |
+| 搜索框流光 | 聚焦 | 同款 `haloSpin 3.2s`，`::before`/`::after` 相位差 1.2s，`mask-composite: exclude` 只留描边 |
+| 滚动暂停流光 | 列表滚动 | `.card-list.scrolling` 时 `animation-play-state: paused`，停止 220ms 后移除 |
+| 面板浮现 | 打开页面 | 本版**直接渲染**，无浮现（可扩展为 `.stage` opacity/scale 进入） |
+| 分段弹入 | 下拉面板打开 | `popIn 0.16s`：`translateY(-4px) scale(.98) → 0 / 1` |
+| 弹窗进入 | 模态打开 | `modalIn 0.2s cubic-bezier(.22,1,.36,1)`：`scale(.94) → 1` |
+| Toast | 显示提示 | `opacity + translateY` 0.24s |
+| **卡片 → 视图** | 点「视图」 | ① 纸张：`420ms` 从 `rotate(0) scale(1)` → `rotate(88deg) scale(0)`，带 `-18px/-42px` 位移；② 卡片列左移 `320ms`；③ 结构树 + 内容面板同时「展开」：`rotateY(±86deg) scaleX(0)` → `scaleX(1)` → `rotateY(0)`，总时长 `880ms`，关键帧 0/.18/.64/.75/.86/.93/.97/1 模拟「展开 → 撞击 → 回弹」 |
+| **视图 → 卡片** | 点「卡片」 | ① 树 + 内容面板：`rotateY(0→±86deg) scaleX(1→.06)` `400ms`；② 下坠淡出：`translateY(0→150px) opacity 1→0` `300ms`；③ 卡片列右移 `420ms`；④ 纸张从 `rotate(88deg) scale(0)` → `rotate(0) scale(1)` `460ms` |
+| 减少动效 | 系统开启减少动效 | `@media (prefers-reduced-motion)` 关闭所有动画，改静态 `outline:1.5px solid #2dd4bf` |
+
+**关键时间常量**：
+```
+T1_PAPER  = 420ms   // 纸张折出
+GAP_1     =  30ms
+T1_CARDS  = 320ms   // 卡片列左移
+GAP_2     =  30ms
+T2_PAGE   = 880ms   // 树 / 内容展开
+T3_FOLD   = 400ms   // 视图折叠
+T3_FALL   = 300ms   // 视图下坠
+T4_CARDS  = 420ms   // 卡片列右移
+T4_PAPER  = 460ms   // 纸张展开
+```
+
+**缓动曲线**：
+```
+E_OUT  = cubic-bezier(.55, .06, .32, 1)   // 折出
+E_GROW = cubic-bezier(.34, .08, .45, 1)   // 初始展开
+E_FALL = cubic-bezier(.55, .10, .85, .55) // 展开中段
+E_HIT  = cubic-bezier(.12, .62, .35, 1)   // 撞击
+E_BACK = cubic-bezier(.30, .06, .70, .5)  // 回弹
+E_IN   = cubic-bezier(.22, 1, .36, 1)     // 进入（纸张展开）
+```
+
+---
+
+## 9. 复现时的关键细节 / 坑
+
+1. **滚动条三端全隐藏**：所有滚动容器（`.card-list`、`.selected-chips`、`.tree-canvas`、`.drop-list`、`.node-body`、`.editor`）都要 `scrollbar-width:none` + `-ms-overflow-style:none` + `::-webkit-scrollbar{display:none}`。
+2. **流光必须做「滚动时暂停」**：`.card-list.scrolling` 加在列表容器上，`animation-play-state:paused`；停止 220ms 后移除（`HALO_PAUSE`）。
+3. **卡片动作按钮 `tabIndex=-1`**：防止键盘 Tab/回车误触删除/恢复，选择只靠鼠标点击。树节点按钮同样如此。
+4. **`@property --halo` 是流光的关键**：没有它 `conic-gradient` 的 `from` 无法参与动画。必须在 `:root` 声明 `syntax:"<angle>"` 且 `inherits:false`。
+5. **`mask-composite: exclude` 双写法**：必须同时给 `-webkit-mask-composite: xor` 和 `mask-composite: exclude`，否则 Safari/Chrome 表现不一致。
+6. **空态要兜底**：删光 / 清空后 `currentId=null`，显示空态文案，**不要再自动补空白便签**（否则会累积两个空白）。只有冷启动 0 条时 `ensureCurrent()` 才会新建。
+7. **纸面横线**：不是图片，是 `repeating-linear-gradient(transparent 0 27px, line 27px 28px)`，**行高必须正好 28px** 才对齐。
+8. **日期格式**：统一 `YYYY.MM.DD HH:mm`（`pad2` 补零）。**纸面日期**用 `updated_at || created_at`；**卡片头日期**用 `deleted_at || created_at`（回收站显示删除时间）。
+9. **活跃卡片流光 `overflow:visible`**：卡片和列表外层都不能裁剪光带溢出（`.card { overflow: hidden }` 会裁掉外圈流光；本版改用 `background-clip: padding-box` + 双层背景实现，避免溢出问题）。
+10. **主题色单一来源**：`--accent: #2dd4bf` 是全站薄荷青，改配色只改 CSS 变量即可。视图模式的紫色 / 琥珀色是扩展色，不与原版冲突。
+11. **模式切换的动画互斥**：`state.running` 期间忽略再次点击分段控件，防止时间轴错乱。
+12. **`ensureCurrent()` 逻辑**：只在 `view === 'notes'` 时补空，视图模式（`outline`）的空态是「这个视图还没有节点，点右上角 ＋ 添加」。
+13. **视图节点坐标持久化**：`node.x / node.y` 会被写入 localStorage；拖动后 `scheduleSave()`。首次布局由 `layoutTree()` 计算。
+14. **树的连线绘制**：每次 `renderTree()` 后必须测量 `card.offsetWidth / offsetHeight` 到 `node._w / _h`，再 `layoutTree()`、再 `drawConnections()`——顺序不能反。
+15. **`justDragged` 标记**：拖动结束 30ms 内屏蔽 `click`，防止拖动后误触发「选中节点」。
+16. **`fromView` / 「视图：」标签**：由视图导入的便签带 `视图：<6 字>` 前缀（超出部分 `…`），用于卡片标签区区分来源。
+17. **`e.target.closest(...)` 冒泡处理**：卡片动作按钮、chips 上的 `✕`、树节点操作按钮都必须 `e.stopPropagation()`，否则会同时触发卡片/节点的 `click` 选中。
+18. **`localStorage` key 差异**：本版为 `notes-ui-v12-aligned`，与旧版 `notes-ui-v12` 分开，避免读到旧结构导致 `_w/_h` 字段丢失。
+
+---
+
+## 10. 文件对应关系（复现时对照）
+
+本版是**单文件 HTML**，组件物理上打包在 `<style>` + `<script>` 内，下面的**逻辑映射**供拆分 / 复用时对照：
+
+| 界面部分 | 本版位置 | 原版对应 |
+| --- | --- | --- |
+| Stage 壳 + 布局 | `.stage` / `.paper-col / .card-col / .outline-col / .content-col` | 窗口壳 + `.panel` |
+| 纸张 | `renderPaper()` + `.paper / .paper-title / .editor / .paper-date` | `components/Paper.tsx` |
+| 搜索框 | `.search` + `.search-filters` | `components/SearchBar.tsx` |
+| 卡片列表 | `renderList()` + `.card-list` | `components/CardList.tsx` |
+| 单张卡片 | `buildCard()` + `.card` | `components/Card.tsx` |
+| 底部按钮 | `renderFoot()` + `.card-foot` | `components/BottomBar.tsx` |
+| 空态 | `.empty` 分支 | `components/EmptyState.tsx` |
+| 关闭按钮 | `.close-btn` | `components/CloseButton.tsx` |
+| 确认框 | `.modal-mask#modalMask` + `.modal` | `components/TrashConfirm.tsx` |
+| **结构树** | `renderTree()` + `.outline-inner` | **v12 新增** |
+| **节点内容面板** | `renderContent()` + `.content-inner` | **v12 新增** |
+| **分段控件** | `.seg` + `toCard() / toOutline()` | **v12 新增** |
+| **标签 / 项目下拉** | `openPanel()` + `.drop-*` | **v12 新增** |
+| 全部样式 | 顶部 `<style>` 块 | `styles/notes.css` |
+| 状态/交互逻辑 | `state` 对象 + 各 `render*()` / 动作函数 | `store/notesStore.ts` |
+| 数据模型 | `makeNote() / makeNode()` + `seed()` | `types.ts` |
+| 后端命令封装 | 无（全部走内存 + localStorage） | `store/notesApi.ts` |
+| 事件/季节主题 | 无（v12 未实现季节水印） | `events/notesEvents.ts` |
+| 快捷键 | 底部 `document.addEventListener('keydown')` | `shortcuts/keys.ts` |
+| 窗口壳 | `boot()` + `.launcher` 显隐 | `src-tauri/src/notes/window.rs` |
+
+---
+
+**与原版差异速查（一页纸）**
+
+| 维度 | 原版 v1 | v12 改进版 |
+| --- | --- | --- |
+| 面板 / Stage | 660×560，`left:40 top:24` | 1300×560（含视图模式的额外两列） |
+| 布局 | 双栏（纸张 + 卡片） | 卡片模式双栏 / 视图模式三栏（树 + 卡片 + 内容） |
+| 分段控件 | 无 | `卡片 / 视图` |
+| 纸张 | 只有正文 | 顶部多「标签 + 项目 + chips + 标题」 |
+| 卡片内容 | 日期 + 摘要 | 日期 + 标题 + 摘要 + 标签 chip 行 |
+| 底部 | `＋` / `🗑` | 同布局，新增「新建视图」语义 |
+| 交互 | 搜索、删/恢复/清空、滚加载 | 增加标签/项目过滤、节点拖拽、节点导入卡片 |
+| 数据结构 | `PageMeta + Page`（扁平） | `Page` 带 `kind` + 递归 `nodes` |
+| 持久化 | SQLite（后端） | `localStorage`（前端，key `notes-ui-v12-aligned`） |
+| 视图切换动画 | 无 | 6 段 3D 折叠（共约 2.1s 一个来回） |
+
+以上。这份文档按你原规格的 10 节结构完整覆盖了 v12 的窗口壳、布局、token、组件、状态机、交互地图、数据模型、动效、坑位和文件对照，可以原样带到别处 1:1 复现。

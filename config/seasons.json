@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "defaultOpacity": 0.10,
+  "defaultFit": "contain",
+  "defaultAlign": "center",
+  "months": {
+    "1":  { "src": "assets/watermark/jan.svg", "ink": "#7C8FA6" },
+    "2":  { "src": "assets/watermark/feb.svg", "ink": "#7F9A9E" },
+    "3":  { "src": "assets/watermark/mar.svg", "ink": "#6BA89B" },
+    "4":  { "src": "assets/watermark/apr.svg", "ink": "#72B3A0" },
+    "5":  { "src": "assets/watermark/may.svg", "ink": "#7AB58F" },
+    "6":  { "src": "assets/watermark/jun.svg", "ink": "#6CAE8E" },
+    "7":  { "src": "assets/watermark/jul.svg", "ink": "#64A8B0" },
+    "8":  { "src": "assets/watermark/aug.svg", "ink": "#6BA6B8" },
+    "9":  { "src": "assets/watermark/sep.svg", "ink": "#5B9BB8" },
+    "10": { "src": "assets/watermark/oct.svg", "ink": "#6FA0BC" },
+    "11": { "src": "assets/watermark/nov.svg", "ink": "#7E9DBE" },
+    "12": { "src": "assets/watermark/dec.svg", "ink": "#7C9AC0" }
+  }
+}

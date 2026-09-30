@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "id": "notes",
+      "name": "便签",
+      "icon": "📝",
+      "command": "toggle_notes",
+      "enabled": true
+    }
+  ]
+}
