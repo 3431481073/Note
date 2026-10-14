@@ -1,0 +1,34 @@
+# Note（便签）的服务声明
+#
+# ⚠️ 本项目有常驻服务 —— 但那个服务**不是独立进程**，是 my-workbench-notes.exe 主进程内嵌的。
+#
+# 详见 docs/service.md
+
+services:
+  - id: notes-readonly-api
+    name: 只读对外接口
+    # 用途：外部软件读便签（拉变更清单 → 按需拉正文）。设计意图是"镜像/同步"。
+    type: http            # loopback HTTP + JSON
+    bind: 127.0.0.1
+    port: 17321           # ⚠️ 固定端口，写死在 src-tauri/src/notes/http.rs:30（不是随机）
+    # 生命周期：随应用启动，随应用退出。**不是独立进程，不能单独起停**
+    managed_by: my-workbench-notes.exe
+    autostart: with-app
+    # ⚠️ 三条硬约束（设计如此，不是缺失）
+    read_only: true       # 只有 GET。外部软件读得到，改不了
+    auth: none            # 不做认证鉴权
+    exposure: loopback    # 只绑回环，不对外网开放
+    endpoints:
+      - GET /notes/changes      # 全量变更清单，只有 id / updated_at / deleted_at，含已删除
+      - GET /notes/{id}         # 单条完整内容
+    impl: src-tauri/src/notes/http.rs
+    data_layer: src-tauri/src/notes/db.rs
+    verify: 'curl.exe http://127.0.0.1:17321/notes/changes'
+    # 本次整理只实测了"端口在监听、持有者是 PID 29608"；
+    # 端点的实际返回内容**未实测**（禁止运行代码）
+
+# 另外两个端口不是服务：
+#   1420 —— vite dev server（strictPort，被占用则启动失败）
+#   1421 —— vite HMR
+#   两者都只在 npm run tauri dev / npm run dev 时出现
+#   ⚠️ vite.config.ts 里 host: "0.0.0.0" —— dev server 绑所有网卡，不是只绑回环

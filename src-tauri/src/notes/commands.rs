@@ -24,7 +24,9 @@ pub fn get_stats(db: State<'_, Database>) -> Result<Stats, String> {
 
 #[tauri::command]
 pub fn get_meta_index(db: State<'_, Database>) -> Result<MetaIndex, String> {
-    db.meta_index().map_err(|e| e.to_string())
+    let mut index = db.meta_index().map_err(|e| e.to_string())?;
+    index.default_project = default_project_dir();
+    Ok(index)
 }
 
 #[tauri::command]
@@ -123,6 +125,34 @@ pub fn list_project_folders() -> Result<Vec<String>, String> {
     Ok(dirs)
 }
 
+/// 前端诊断日志：往 trace.log 追加一行（`ui` 前缀便于与后端事件区分）。
+#[tauri::command]
+pub fn trace(msg: String) {
+    super::trace::log(&format!("ui\t{msg}"));
+}
+
+/// 后台导入（catcher 文本 → 卡片）走到哪了。
+///
+/// 前端 init 收尾时问一次：导入可能在前端挂上监听之前就结束了，那个
+/// `notes://catcher-imported` 事件没人听见 —— 靠这次对账补上。
+#[tauri::command]
+pub fn catcher_import_status(app: AppHandle) -> super::import::ImportState {
+    super::import::status(&app)
+}
+
+/// 结束便签进程。
+///
+/// 调用方（前端 closeNotes）保证**已经落盘成功**才调这里——这是「关掉真的关掉」的语义，
+/// 进程不再后台常驻。响应先返回，再退出：直接在命令里 exit 会让本次 IPC 的响应发不回去。
+#[tauri::command]
+pub fn quit_notes(app: AppHandle) {
+    super::trace::log("db: quit_notes (frontend confirmed saved)");
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.exit(0);
+    });
+}
+
 #[tauri::command]
 pub fn create_page(
     db: State<'_, Database>,
@@ -131,6 +161,8 @@ pub fn create_page(
 ) -> Result<Page, String> {
     let k = kind.unwrap_or_else(|| "note".to_string());
     let page = db.create(&k).map_err(|e| e.to_string())?;
+    // 每一次建便签都留痕——排查「凭空多出空白便签」时这是唯一的权威记录。
+    super::trace::log(&format!("db: create_page id={} kind={}", page.id, page.kind));
     events::emit_changed(
         &app,
         ChangedPayload {

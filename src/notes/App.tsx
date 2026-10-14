@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { notesStore, useNotesStore } from "./store/notesStore";
 import { notesApi } from "./store/notesApi";
-import type { Mode } from "./types";
+import type { HitRect, Mode } from "./types";
 import { applySeason, setupNotesEvents } from "./events/notesEvents";
 import { registerShortcuts } from "./shortcuts/keys";
 import Paper from "./components/Paper";
@@ -69,9 +69,14 @@ function nextFrame(): Promise<void> {
 }
 
 // 收集所有可见面板的客户区矩形（物理像素），上报给 Rust 做 WM_NCHITTEST 点击穿透判断。
+// 折起来的列是 transform: scaleX(0)，宽高为 0，靠下面的守卫天然被排除。
+//
+// 刻意保持「同步直报」这个最朴素的形态：曾经把它改成 rAF 节流 + 去重 + 监听
+// transition/animation + ResizeObserver + MutationObserver，结果引入了难以复现的
+// 不稳定（窗口像是卡住）。这套逻辑每帧都在跑，越复杂越危险——宁可多几次 invoke。
 function reportHitRects() {
   const dpr = window.devicePixelRatio || 1;
-  const rects: { x: number; y: number; w: number; h: number }[] = [];
+  const rects: HitRect[] = [];
   document.querySelectorAll<HTMLElement>("[data-hit]").forEach((el) => {
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
@@ -341,6 +346,7 @@ export default function App() {
                   items={listItems}
                   view={state.view}
                   activeId={state.currentPageId}
+                  defaultProject={state.metaIndex.default_project}
                   hasMore={
                     filtering ? false : isTrash ? state.hasMoreTrash : state.hasMoreActive
                   }

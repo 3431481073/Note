@@ -16,7 +16,10 @@ pub struct HitRect {
     pub h: i32,
 }
 
-static HIT_RECTS: Mutex<Vec<HitRect>> = Mutex::new(Vec::new());
+/// `None` = 未武装：前端从未成功上报过矩形（页面还没渲染出来）。
+/// 此时**必须**按普通窗口处理。反过来（把空当成「全部穿透」）会让一个没渲染成功的
+/// 窗口变成整块点不动、关不掉的死区——这是曾经的严重事故，不要再退回去。
+static HIT_RECTS: Mutex<Option<Vec<HitRect>>> = Mutex::new(None);
 
 const SUBCLASS_ID: usize = 0x6e6f7465_5f686974; // 任意唯一 id
 
@@ -34,14 +37,17 @@ unsafe extern "system" fn hit_test_proc(
         let sy = ((lparam as i32 >> 16) & 0xffff) as i16 as i32;
         let mut pt = POINT { x: sx, y: sy };
         if ScreenToClient(hwnd, &mut pt) != 0 {
-            if let Ok(rects) = HIT_RECTS.lock() {
-                for r in rects.iter() {
-                    if pt.x >= r.x && pt.x < r.x + r.w && pt.y >= r.y && pt.y < r.y + r.h {
-                        return DefSubclassProc(hwnd, msg, wparam, lparam);
-                    }
-                }
+            // 先在锁内算出结论，放锁之后再调 DefSubclassProc——避免它在重入时再进本函数造成自我死锁。
+            let inside = HIT_RECTS.lock().ok().map(|guard| match guard.as_ref() {
+                None => true,
+                Some(rects) => rects.iter().any(|r| {
+                    pt.x >= r.x && pt.x < r.x + r.w && pt.y >= r.y && pt.y < r.y + r.h
+                }),
+            });
+            // 只有明确判定「在命中矩形之外」才穿透；未武装/锁中毒一律当普通窗口。
+            if inside == Some(false) {
+                return HTTRANSPARENT as LRESULT;
             }
-            return HTTRANSPARENT as LRESULT;
         }
     }
     DefSubclassProc(hwnd, msg, wparam, lparam)
@@ -54,7 +60,12 @@ pub fn install(hwnd: HWND) {
 }
 
 pub fn set_rects(rects: Vec<HitRect>) {
+    // 真实界面至少有 CloseButton，不可能一个矩形都没有；空数组只可能是收集失败。
+    // 此时保留上一份有效值——比「整窗穿透」安全得多。
+    if rects.is_empty() {
+        return;
+    }
     if let Ok(mut guard) = HIT_RECTS.lock() {
-        *guard = rects;
+        *guard = Some(rects);
     }
 }

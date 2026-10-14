@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, type ClipboardEvent } from "react";
 import type { MetaIndex, Page, Tag } from "../types";
 import { formatDate } from "../format";
 import TagSelect from "./TagSelect";
@@ -37,8 +37,34 @@ const Paper = forwardRef<HTMLTextAreaElement, PaperProps>(
   ) => {
     const tags = page?.tags ?? [];
     const project = page?.projects?.[0] ?? "";
+
+    /**
+     * 没选中任何文字时，Ctrl+C 复制整条便签（标题 + 正文）。
+     * 标题是 <input>、正文是 <textarea>，两个独立元素，没法用鼠标跨元素选择，
+     * 否则只能复制两次。
+     */
+    function handleCopy(e: ClipboardEvent<HTMLDivElement>) {
+      // input/textarea 内部的选区不体现在 window.getSelection() 上，得看 selectionStart/End。
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+        if (active.selectionStart !== active.selectionEnd) return; // 真的选中了 → 放行原生
+      }
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) return; // 别处有选中 → 放行原生
+
+      const text = [page?.title ?? "", page?.content ?? ""]
+        .filter((s) => s.length > 0)
+        .join("\n");
+      if (!text) return; // 空便签，别拦，交回原生行为
+
+      // 必须同步写入：这是 copy 事件，异步的 navigator.clipboard.writeText
+      // 可能因用户手势窗口关闭而 reject。
+      e.preventDefault();
+      e.clipboardData.setData("text/plain", text);
+    }
+
     return (
-      <div className="paper">
+      <div className="paper" onCopy={handleCopy}>
         <div className="paper-watermark" aria-hidden="true"></div>
         <div className="paper-date">
           {page ? formatDate(page.updated_at || page.created_at) : ""}

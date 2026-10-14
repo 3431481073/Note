@@ -57,6 +57,8 @@ export interface Stats {
 export interface MetaIndex {
   tags: Tag[];
   projects: string[];
+  /** 默认项目根（如 `D:\MyProject`）。指向它的卡片不显示项目标记。 */
+  default_project: string | null;
 }
 
 export interface Tag {
@@ -97,4 +99,12 @@ export interface HitRect {
   y: number;
   w: number;
   h: number;
+}
+
+/** 后台导入（catcher 文本 → 卡片）的状态。`state`：pending / running / done / failed / skipped。 */
+export interface CatcherImportStatus {
+  state: string;
+  imported: number;
+  skipped: number;
+  message: string | null;
 }

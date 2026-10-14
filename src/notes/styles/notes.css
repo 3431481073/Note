@@ -249,6 +249,42 @@ body,
   transition: color 400ms ease-out;
 }
 
+/* 项目标记：卡片内部最底一行，只有绑定了「比默认根更具体」的目录时才渲染。
+   绝对定位钉在卡片底部——这样没有标题的卡片上，标记也落在底部而不是跟着正文走。
+   刻意不用 flex + margin-top:auto：那会把 .card-body 变成 flex item，而它的
+   -webkit-line-clamp 依赖块级上下文，没必要为这一点冒风险。 */
+.card-project {
+  position: absolute;
+  left: 14px; /* 与 .card 的左右内边距对齐 */
+  right: 14px;
+  bottom: 4px;
+  z-index: 1;
+  font-size: 11px;
+  line-height: 1;
+  color: #4f46e5;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card.trash .card-project {
+  color: var(--trash-text);
+}
+
+/* 有项目标记时把正文压到一行、并收紧上方间距，给底部标记腾出空间。
+   卡片高度固定 84px 不能动——CardList 的虚拟列表按固定步长（92px）定位卡片，
+   单张卡片变高会压到下一张上。 */
+.card.has-project .card-body {
+  -webkit-line-clamp: 1;
+}
+.card.has-project .card-head {
+  margin-bottom: 2px;
+}
+.card.has-project .card-title {
+  margin-bottom: 1px;
+}
+
 .card-body {
   position: relative;
   z-index: 1;

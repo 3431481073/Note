@@ -7,3 +7,9 @@ export function formatDate(ts: number): string {
     d.getHours(),
   )}:${p(d.getMinutes())}`;
 }
+
+/** 项目路径 → 末段文件夹名，用于在窄处（卡片、按钮）显示。 */
+export function projectName(path: string): string {
+  if (!path) return "";
+  return path.split(/[\\/]/).pop() || path;
+}

@@ -66,6 +66,9 @@ pub struct Stats {
 pub struct MetaIndex {
     pub tags: Vec<Tag>,
     pub projects: Vec<String>,
+    /// 默认项目根（本 Note 项目的上一层，如 `D:\MyProject`）。前端据此隐藏指向根目录
+    /// 本身的卡片标记——根目录对每张卡片都一样，显示出来没有信息量。
+    pub default_project: Option<String>,
 }
 
 /// 标签：唯一 ID + 名字 + 说明 + 状态（激活/熄灭）。卡片通过 ID 引用，重命名不影响引用。

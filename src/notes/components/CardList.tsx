@@ -14,6 +14,8 @@ interface CardListProps {
   items: PageMeta[];
   view: View;
   activeId: string | null;
+  /** 默认项目根；指向它的卡片不显示项目标记。 */
+  defaultProject?: string | null;
   hasMore: boolean;
   onLoadMore: () => void;
   onSelect: (id: string) => void;
@@ -79,6 +81,7 @@ const CardList = forwardRef<CardListHandle, CardListProps>((props, ref) => {
                   meta={meta}
                   active={meta.id === props.activeId}
                   view={props.view}
+                  defaultProject={props.defaultProject}
                   onSelect={props.onSelect}
                   onDoubleSelect={props.onDoubleSelect}
                   onDelete={props.onDelete}

@@ -1,6 +1,7 @@
 // 后端命令的薄封装，统一类型与错误处理
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CatcherImportStatus,
   Cursor,
   HitRect,
   MetaIndex,
@@ -113,5 +114,20 @@ export const notesApi = {
 
   setHitRects(rects: HitRect[]): Promise<void> {
     return invoke<void>("set_hit_rects", { rects });
+  },
+
+  /** 诊断日志：往 app_data_dir/trace.log 追加一行。只用于事后取证，失败无声。 */
+  trace(msg: string): Promise<void> {
+    return invoke<void>("trace", { msg });
+  },
+
+  /** 后台导入（catcher 文本 → 卡片）的状态。前台只读，绝不触发导入。 */
+  catcherImportStatus(): Promise<CatcherImportStatus> {
+    return invoke<CatcherImportStatus>("catcher_import_status");
+  },
+
+  /** 结束便签进程。**调用前必须已经落盘成功**（见 notesStore.closeNotes）。 */
+  quitNotes(): Promise<void> {
+    return invoke<void>("quit_notes");
   },
 };

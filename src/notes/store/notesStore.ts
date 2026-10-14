@@ -1,7 +1,6 @@
 // 便签页状态仓库：单一数据源，外部存储 + 订阅模式（useSyncExternalStore）。
 // 只做数据与竞态协调；UI 滚动、动画、焦点由组件负责。
 import { useSyncExternalStore } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   ChangedPayload,
   Cursor,
@@ -62,7 +61,7 @@ const initial: NotesState = {
   stats: { active: 0, trash: 0, outline: 0, trash_outline: 0 },
   activeTags: [],
   activeProjects: [],
-  metaIndex: { tags: [], projects: [] },
+  metaIndex: { tags: [], projects: [], default_project: null },
   mode: "card",
   outlines: [],
   currentOutline: null,
@@ -110,6 +109,7 @@ class NotesStore {
   private state: NotesState = initial;
   private listeners = new Set<() => void>();
   private creating = false;
+  private initializing = false;
 
   subscribe = (fn: () => void): (() => void) => {
     this.listeners.add(fn);
@@ -125,28 +125,58 @@ class NotesStore {
 
   // ---------- 初始化 ----------
   async init() {
+    // 幂等 + 防重入闸门：init 在 App 挂载时调用，重复挂载/页面重载都会再进来。
+    if (this.initializing || this.state.initialized) return;
+    this.initializing = true;
     try {
-      const stats = await notesApi.getStats();
-      this.setState({ stats });
-    } catch {
-      /* 忽略，稍后由 stats 事件补齐 */
+      await notesApi.trace("init: begin").catch(() => {});
+      let stats = this.state.stats;
+      try {
+        stats = await notesApi.getStats();
+        this.setState({ stats });
+      } catch {
+        /* 忽略，稍后由 stats 事件补齐 */
+      }
+      try {
+        const metaIndex = await notesApi.getMetaIndex();
+        this.setState({ metaIndex });
+      } catch {
+        /* 忽略 */
+      }
+
+      const loaded = await this.loadFirstPage("active");
+      if (!loaded) {
+        // 读列表失败时**绝不能**因为「看起来是空的」就新建便签——那会凭空造出空白便签。
+        // 曾经的事故就是：这条路径静默吞错 + 每次启动都判定为空 → 每次启动多一张空白便签。
+        await notesApi.trace("init: list_pages failed, skip auto-create").catch(() => {});
+        this.setState({ initialized: true });
+        return;
+      }
+
+      if (this.state.active.length > 0) {
+        await this.selectPage(this.state.active[0].id);
+      } else if (
+        stats.active + stats.trash + stats.outline + stats.trash_outline === 0
+      ) {
+        // 只有「整个库真的没有任何页面」（全新安装）才自动建一张，
+        // 这样便签全在回收站、或用户清空列表时，不会每次启动都冒出一张空白便签。
+        await notesApi.trace("init: empty library, auto-create").catch(() => {});
+        await this.createNewPage();
+      } else {
+        this.setState({ currentPageId: null, currentPage: null });
+      }
+      await notesApi.trace("init: done").catch(() => {});
+      this.setState({ initialized: true });
+      // 后台导入（catcher 文本 → 卡片）可能在前端挂上监听【之前】就结束了，
+      // 那次 notes://catcher-imported 没人听见 —— 这里对一次账。
+      await this.reconcileImport();
+    } finally {
+      this.initializing = false;
     }
-    try {
-      const metaIndex = await notesApi.getMetaIndex();
-      this.setState({ metaIndex });
-    } catch {
-      /* 忽略 */
-    }
-    await this.loadFirstPage("active");
-    if (this.state.active.length > 0) {
-      await this.selectPage(this.state.active[0].id);
-    } else {
-      await this.createNewPage();
-    }
-    this.setState({ initialized: true });
   }
 
-  async loadFirstPage(view: View) {
+  /** 拉取某一视图的第一页。返回是否成功——调用方据此决定能否把「空列表」当真。 */
+  async loadFirstPage(view: View): Promise<boolean> {
     try {
       const res = await notesApi.listPages(view, null);
       if (view === "active") {
@@ -162,8 +192,11 @@ class NotesStore {
           nextTrashCursor: res.next_cursor,
         });
       }
+      return true;
     } catch (e) {
       console.error("loadFirstPage failed", e);
+      void notesApi.trace(`loadFirstPage(${view}) failed`).catch(() => {});
+      return false;
     }
   }
 
@@ -350,6 +383,43 @@ class NotesStore {
     this.setState({ metaIndex });
   }
 
+  // ---------- 后台导入（catcher 文本 → 卡片）----------
+
+  /**
+   * 后台把 catcher 文本导成卡片之后，把列表 / 标签 / 计数对上。
+   *
+   * 两条路都走这里：`notes://catcher-imported` 事件到达时一次；`init` 收尾时对一次账
+   * （导入可能跑在监听挂上之前，那次事件就此丢掉）。重复调用是幂等的。
+   *
+   * **只刷新，不提示** —— 用户明确不要「本轮新导入 N 条」这类提示 / 角标。
+   */
+  async refreshAfterImport() {
+    if (!this.state.initialized) return; // init 还没收尾，交给它那一次
+    try {
+      this.setState({ stats: await notesApi.getStats() });
+    } catch {
+      /* 忽略，只是个计数 */
+    }
+    try {
+      this.setState({ metaIndex: await notesApi.getMetaIndex() });
+    } catch {
+      /* 忽略 */
+    }
+    // 正在编辑时不重排列表，免得覆盖还没落盘的正文。
+    if (!localDirty) {
+      await this.loadFirstPage(this.state.view);
+    }
+  }
+
+  private async reconcileImport() {
+    try {
+      const st = await notesApi.catcherImportStatus();
+      if (st.imported > 0) await this.refreshAfterImport();
+    } catch {
+      /* 导入是后台的事，读不到就算了 —— 绝不能因为它影响启动 */
+    }
+  }
+
   async createTag(name: string, description?: string) {
     const tag = await notesApi.createTag(name, description);
     await this.refreshTags();
@@ -402,10 +472,11 @@ class NotesStore {
     flushTimer = window.setTimeout(() => this.doFlush(id), delay);
   }
 
-  private async doFlush(id: string) {
+  /** 落盘当前页。返回是否「确实已落盘」（没有待写内容也算成功）。 */
+  private async doFlush(id: string): Promise<boolean> {
     const seq = ++flushSeq;
     const cur = this.state.currentPage;
-    if (!cur) return;
+    if (!cur) return true;
     try {
       const res: UpdateResult = await notesApi.updatePage(
         id,
@@ -414,36 +485,66 @@ class NotesStore {
         cur.tags,
         cur.projects,
       );
-      if (seq !== flushSeq) return;
+      if (seq !== flushSeq) return true;
       localVersion = res.version;
       localDirty = false;
       // 标签关联可能已变，刷新标签列表（card_count）。
       void this.refreshTags();
+      return true;
     } catch (e) {
       // 写库失败：保持 dirty，等待下次输入重试
       localDirty = true;
       console.error("flush failed", e);
+      return false;
     }
   }
 
   /** 立即落盘（切换页面 / 关闭前调用）。 */
-  async flushNow() {
+  /** 立即落盘（切换页面 / 关闭前调用）。返回是否落盘成功——关闭流程据此决定要不要退出。 */
+  async flushNow(): Promise<boolean> {
     if (flushTimer !== null) {
       clearTimeout(flushTimer);
       flushTimer = null;
     }
-    if (!localDirty) return;
+    if (!localDirty) return true;
     const id = this.state.currentPageId;
-    if (!id) return;
-    await this.doFlush(id);
+    if (!id) return true;
+    return await this.doFlush(id);
   }
 
+  private closing = false;
+
+  /**
+   * 点 × 或 Alt+F4：**先落盘，成功才真的退出进程**。
+   *
+   * 关掉就是真的关掉：进程结束、不后台常驻（以前只是 hide()，进程会带着冻结的页面
+   * 常驻好几天，重开时又要恢复合成，那是黑块/僵住那一类怪现象的温床）。
+   * 代价是重新打开为一次冷启动，实测约 1.8 秒（其中约 1.4 秒是 WebView2 自身引导）。
+   *
+   * 落盘失败就**不退出**并提示——「关了但没存上」比「关不掉」糟糕得多。
+   */
   async closeNotes() {
-    await this.flushNow();
+    if (this.closing) return;
+    this.closing = true;
+    let saved: boolean;
     try {
-      await getCurrentWindow().hide();
+      saved = await this.flushNow();
     } catch (e) {
-      console.error("hide failed", e);
+      console.error("flush on close failed", e);
+      saved = false;
+    }
+    if (!saved) {
+      this.closing = false; // 允许再试
+      this.showToast("保存失败，已取消关闭");
+      return;
+    }
+    try {
+      await notesApi.trace("quit: saved, exiting").catch(() => {});
+      await notesApi.quitNotes();
+    } catch (e) {
+      this.closing = false;
+      console.error("quit failed", e);
+      this.showToast("退出失败");
     }
   }
 

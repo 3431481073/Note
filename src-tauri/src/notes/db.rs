@@ -297,6 +297,26 @@ impl Database {
             )?;
             tx.commit()?;
         }
+
+        // v5：导入账本 —— 记「哪些上游文本已经拉过」。
+        //
+        // 刻意【不依附卡片】：卡片被彻底删除（purge）后这一行仍然在，同一段文本因此
+        // 不会第二次进来。也正因为如此，这里不建指向 pages 的外键、purge 也不级联删它。
+        if current < 5 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS imported_texts (
+                    text_id     TEXT PRIMARY KEY,
+                    page_id     TEXT,
+                    imported_at INTEGER NOT NULL
+                 );",
+            )?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?1)",
+                params![now_ms()],
+            )?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -316,6 +336,28 @@ impl Database {
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<Page>> {
         let conn = self.conn.lock().unwrap();
         Self::get_locked(&conn, id)
+    }
+
+    /// 只读对外接口用：全量变更清单，**只有 id / updated_at / deleted_at 三列**。
+    ///
+    /// 含已删除条目（`deleted_at` 非空），外部据此识别删除。
+    /// 刻意不取正文、标题、标签 —— 这是给轮询用的轻量接口，全量下发也不大。
+    pub fn changes_all(&self) -> rusqlite::Result<Vec<(String, i64, Option<i64>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, updated_at, deleted_at FROM pages ORDER BY updated_at DESC, id DESC")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// 分页列表。`query` 为原始搜索串（内部做 LIKE 转义），空串匹配全部。
@@ -614,7 +656,12 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let tags = Self::list_tags_locked(&conn)?;
         let projects = distinct_json_values(&conn, "projects")?;
-        Ok(MetaIndex { tags, projects })
+        // default_project 是编译期路径常量，与数据库无关，由上层命令填充。
+        Ok(MetaIndex {
+            tags,
+            projects,
+            default_project: None,
+        })
     }
 
     // ---------- 标签 ----------
@@ -890,6 +937,167 @@ impl Database {
         )?;
         Ok(n > 0)
     }
+
+    // ---------- 导入（外部文本源 → 卡片） ----------
+
+    /// 把上游文本落成【普通卡片】：一次事务，要么全进要么全不进。
+    ///
+    /// 三条纪律写在这里，别在调用方重复：
+    /// - **认 `text_id` 去重**：账本 `imported_texts` 里有的直接跳过 —— 这是「只新增」的
+    ///   全部实现。既然从不重导，就不可能覆盖用户改过的卡片。
+    /// - **账本与卡片同事务、但不同生命周期**：`purge` 不碰账本，所以卡片彻底删掉之后
+    ///   那段文本也不会再进来。
+    /// - **标签镜像上游原名**：活标签重名即合并（复用原 ID），没有才新建；
+    ///   每张卡片另外自动挂一枚 [`super::import::MOBILE_TAG`]。
+    pub fn import_texts(&self, rows: &[ImportedText]) -> Result<ImportOutcome, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = now_ms();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        // 账本：本批之外的已导入 text_id。
+        let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT text_id FROM imported_texts")
+                .map_err(|e| e.to_string())?;
+            let it = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            for r in it {
+                known.insert(r.map_err(|e| e.to_string())?);
+            }
+        }
+
+        // 标签名 → 活标签 ID。一次建图，本批新建的也进图（同一批里重名即合并）。
+        let mut tag_ids: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT name, id FROM tags WHERE extinguished = 0")
+                .map_err(|e| e.to_string())?;
+            let it = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            for r in it {
+                let (name, id) = r.map_err(|e| e.to_string())?;
+                tag_ids.entry(name).or_insert(id);
+            }
+        }
+
+        let projects_json = default_projects_json();
+        let mut outcome = ImportOutcome::default();
+
+        for row in rows {
+            if known.contains(&row.text_id) {
+                outcome.skipped_existing += 1;
+                continue;
+            }
+            // 空正文不落卡（会变成一张看不出内容的空白卡），也【不记账】——
+            // 上游之后把正文补上时，它仍然是「第一次拉」。
+            if row.content.trim().is_empty() {
+                outcome.skipped_empty += 1;
+                continue;
+            }
+
+            let id = nanoid(21);
+            let summary = make_summary(&row.content);
+
+            // 标签：自动挂「手机」在前，随后镜像上游原名（去重、去空）。
+            let mut names: Vec<String> = vec![super::import::MOBILE_TAG.to_string()];
+            for t in &row.tags {
+                let t = t.trim();
+                if !t.is_empty() && !names.iter().any(|n| n == t) {
+                    names.push(t.to_string());
+                }
+            }
+            let mut tag_id_list: Vec<String> = Vec::with_capacity(names.len());
+            for name in &names {
+                let tid = match tag_ids.get(name) {
+                    Some(existing) => existing.clone(),
+                    None => {
+                        let fresh = nanoid(21);
+                        tx.execute(
+                            "INSERT INTO tags (id, name, description, extinguished) VALUES (?1, ?2, '', 0)",
+                            params![fresh, name],
+                        )
+                        .map_err(|e| e.to_string())?;
+                        tag_ids.insert(name.clone(), fresh.clone());
+                        fresh
+                    }
+                };
+                tag_id_list.push(tid);
+            }
+
+            let tags_json =
+                serde_json::to_string(&tag_id_list).unwrap_or_else(|_| "[]".to_string());
+            tx.execute(
+                "INSERT INTO pages (id, content, summary, created_at, updated_at, deleted_at,
+                                    version, title, kind, tags, projects, nodes_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, 1, ?6, 'note', ?7, ?8, NULL)",
+                params![
+                    id,
+                    row.content,
+                    summary,
+                    row.created_at,
+                    row.updated_at,
+                    row.title,
+                    tags_json,
+                    projects_json
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+            for tid in &tag_id_list {
+                tx.execute(
+                    "INSERT OR IGNORE INTO card_tags (card_id, tag_id) VALUES (?1, ?2)",
+                    params![id, tid],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            tx.execute(
+                "INSERT INTO imported_texts (text_id, page_id, imported_at) VALUES (?1, ?2, ?3)",
+                params![row.text_id, id, now],
+            )
+            .map_err(|e| e.to_string())?;
+
+            known.insert(row.text_id.clone());
+            outcome.imported += 1;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(outcome)
+    }
+
+    /// 账本里已导入的 `text_id` 条数（只用于诊断/自检）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn imported_text_count(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM imported_texts", [], |r| r.get(0))
+    }
+}
+
+/// 一条待导入的上游文本（由 `import` 模块从外部库读出后交给 [`Database::import_texts`]）。
+pub struct ImportedText {
+    /// 上游主键，形如 `catcher:<源id>`。去重就认它。
+    pub text_id: String,
+    pub title: String,
+    pub content: String,
+    /// 上游标签**原名**（不是本库的标签 ID）。
+    pub tags: Vec<String>,
+    /// 上游自带的时间（epoch 毫秒），不是导入时刻。
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// 一轮导入的结果。
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct ImportOutcome {
+    pub imported: i64,
+    pub skipped_existing: i64,
+    pub skipped_empty: i64,
 }
 
 #[cfg(test)]
@@ -1305,5 +1513,148 @@ mod tests {
             [],
         );
         assert!(r.is_err());
+    }
+
+    // ---------- 导入 ----------
+
+    fn text(id: &str, content: &str, tags: &[&str], created_at: i64) -> ImportedText {
+        ImportedText {
+            text_id: id.to_string(),
+            title: String::new(),
+            content: content.to_string(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    fn tag_names_of(db: &Database, page_id: &str) -> Vec<String> {
+        let page = db.get(page_id).unwrap().unwrap();
+        let all = db.list_tags().unwrap();
+        page.tags
+            .iter()
+            .map(|id| {
+                all.iter()
+                    .find(|t| &t.id == id)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| format!("<{id}?>"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn import_texts_creates_normal_cards_and_ledger() {
+        let db = db();
+        let rows = vec![
+            text("catcher:rec_1", "第一条", &["待作"], 1_760_000_000_000),
+            text("catcher:rec_2", "第二条", &[], 1_760_000_001_000),
+        ];
+        let out = db.import_texts(&rows).unwrap();
+        assert_eq!(out.imported, 2);
+        assert_eq!(out.skipped_existing, 0);
+        assert_eq!(db.imported_text_count().unwrap(), 2);
+
+        // 是普通便签，不是视图。
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.active, 2);
+        assert_eq!(stats.outline, 0);
+
+        let list = db.list(View::Active, None, "", &[], &[]).unwrap();
+        let ids: Vec<&str> = list.items.iter().map(|m| m.id.as_str()).collect();
+        let one = ids.iter().find(|id| tag_names_of(&db, id).contains(&"待作".to_string()));
+        assert!(one.is_some(), "导入卡片应带上游标签");
+        // 每张卡片都自动挂「手机」。
+        for id in &ids {
+            assert!(tag_names_of(&db, id).contains(&"手机".to_string()));
+        }
+    }
+
+    #[test]
+    fn import_texts_is_idempotent_by_text_id() {
+        let db = db();
+        let rows = vec![text("catcher:rec_1", "只此一条", &[], 1_760_000_000_000)];
+        assert_eq!(db.import_texts(&rows).unwrap().imported, 1);
+        // 同一份数据再导一次：一条都不进（认 text_id，不认内容）。
+        let again = db.import_texts(&rows).unwrap();
+        assert_eq!(again.imported, 0);
+        assert_eq!(again.skipped_existing, 1);
+        assert_eq!(db.stats().unwrap().active, 1);
+        assert_eq!(db.imported_text_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn import_texts_skips_empty_content_without_ledger_row() {
+        let db = db();
+        let rows = vec![
+            text("catcher:empty", "   \n ", &[], 1_760_000_000_000),
+            text("catcher:full", "有内容", &[], 1_760_000_001_000),
+        ];
+        let out = db.import_texts(&rows).unwrap();
+        assert_eq!(out.imported, 1);
+        assert_eq!(out.skipped_empty, 1);
+        // 空正文不记账 —— 上游补齐正文后它仍算「第一次拉」。
+        assert_eq!(db.imported_text_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn import_texts_mirrors_tag_names_merging_duplicates() {
+        let db = db();
+        // 已有一枚活标签「洞察」——导入必须复用它，而不是新建同名的。
+        let existing = db.create_tag("洞察", "").unwrap();
+        let rows = vec![
+            text("catcher:rec_1", "甲", &["洞察", "待作"], 1_760_000_000_000),
+            text("catcher:rec_2", "乙", &["洞察"], 1_760_000_001_000),
+        ];
+        assert_eq!(db.import_texts(&rows).unwrap().imported, 2);
+
+        let tags = db.list_tags().unwrap();
+        // 「洞察」只有一枚（重名即合并）；名字集合 = 洞察 / 待作 / 手机。
+        let mut names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["待作", "手机", "洞察"]); // 按码点排，不是拼音
+
+        // 两张卡都指向同一枚「洞察」ID。
+        let list = db.list(View::Active, None, "", &[], &[]).unwrap();
+        for m in &list.items {
+            assert!(m.tags.iter().any(|t| t == &existing.id));
+        }
+        assert_eq!(
+            tags.iter().find(|t| t.name == "洞察").unwrap().card_count,
+            2
+        );
+    }
+
+    #[test]
+    fn import_texts_survives_card_purge() {
+        let db = db();
+        let rows = vec![text("catcher:rec_1", "删了也不重来", &[], 1_760_000_000_000)];
+        db.import_texts(&rows).unwrap();
+        let id = db.list(View::Active, None, "", &[], &[]).unwrap().items[0].id.clone();
+
+        // 用户在 Note 里把这张卡彻底删掉。
+        db.soft_delete(&id).unwrap().unwrap();
+        db.purge(&id).unwrap().unwrap();
+        assert_eq!(db.stats().unwrap().active, 0);
+
+        // 账本还在 → 下一轮不会再把它拉回来（「本地删除只删本地」）。
+        let again = db.import_texts(&rows).unwrap();
+        assert_eq!(again.imported, 0);
+        assert_eq!(again.skipped_existing, 1);
+        assert_eq!(db.stats().unwrap().active, 0);
+    }
+
+    #[test]
+    fn import_texts_keeps_source_time_order() {
+        let db = db();
+        // 上游给你的时候顺序是乱的：按 src_created_at 排，不是导入时刻。
+        let rows = vec![
+            text("catcher:c", "丙", &[], 1_760_000_200_000),
+            text("catcher:a", "甲", &[], 1_760_000_000_000),
+            text("catcher:b", "乙", &[], 1_760_000_100_000),
+        ];
+        db.import_texts(&rows).unwrap();
+        let list = db.list(View::Active, None, "", &[], &[]).unwrap();
+        let summaries: Vec<&str> = list.items.iter().map(|m| m.summary.as_str()).collect();
+        assert_eq!(summaries, vec!["丙", "乙", "甲"]); // created_at 降序
     }
 }

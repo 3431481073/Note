@@ -16,6 +16,20 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        // 便签窗口没有标题栏，但 Alt+F4 仍会发 WM_CLOSE。默认行为是直接销毁窗口——那会
+        // **绕开前端的落盘**，造成「关了但没存上」。所以拦下来，改用和点 × 完全相同的流程：
+        // 通知前端先落盘，落盘成功再退出进程（见前端 closeNotes / quit_notes 命令）。
+        //
+        // 关掉就是真的关掉：进程结束、不后台常驻。重新打开是一次冷启动（实测约 1.8 秒）。
+        .on_window_event(|window, event| {
+            if window.label() != "notes" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = tauri::Emitter::emit(window, "notes://close-requested", ());
+            }
+        })
         .setup(|app| {
             notes::setup(app)?;
             workbench::setup(app);
@@ -46,6 +60,9 @@ fn main() {
             notes::commands::list_outlines,
             notes::commands::save_outline,
             notes::commands::set_hit_rects,
+            notes::commands::trace,
+            notes::commands::catcher_import_status,
+            notes::commands::quit_notes,
             workbench::action::toggle_notes,
             workbench::action::open_notes,
         ])

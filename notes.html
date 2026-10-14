@@ -4,6 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>便签</title>
+    <!--
+      窗口透明必须在这里就生效，不能只依赖 src/notes/main.tsx 里 import 的那份 CSS。
+      那份 CSS 要等 JS bundle 下载并执行完才起作用；在此之前窗口没有样式，就会露出
+      webview 的不透明底色——开发中 Vite 重启 / 热更新失败 / JS 报错时，这会让一个
+      1300×648 的窗口变成盖住屏幕的黑块。内联样式在 head 里、先于一切脚本执行。
+      注意：Vite 对 HTML 入口只重写 <script src> 和 <link href>，内联 <style> 原样保留，
+      dev 和 release 都有效；CSP 为 null 也不会拦它。
+    -->
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

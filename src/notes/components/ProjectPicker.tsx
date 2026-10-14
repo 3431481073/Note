@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { projectName } from "../format";
 
 interface ProjectPickerProps {
   project: string;
@@ -12,7 +13,7 @@ export default function ProjectPicker({ project, onSelect, onBrowse }: ProjectPi
   const [folders, setFolders] = useState<string[]>([]);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const name = project ? project.split(/[\\/]/).pop() || project : "绑定项目";
+  const name = projectName(project) || "绑定项目";
 
   async function loadFolders() {
     try {

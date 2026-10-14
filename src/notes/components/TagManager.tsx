@@ -102,7 +102,7 @@ export default function TagManager({
   }
 
   return (
-    <div className="tag-mask" onMouseDown={onClose}>
+    <div className="tag-mask" data-hit onMouseDown={onClose}>
       <div className="tag-panel" onMouseDown={(e) => e.stopPropagation()}>
         <div className="tag-panel-head">
           <span>标签管理</span>

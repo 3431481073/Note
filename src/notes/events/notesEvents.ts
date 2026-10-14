@@ -77,5 +77,15 @@ export async function setupNotesEvents() {
   const u3 = await listen("notes://config-changed", () => {
     applySeason(new Date().getMonth() + 1);
   });
-  unlisteners = [u1, u2, u3];
+  // Alt+F4 / 系统关闭请求：Rust 侧拦下了默认的销毁，改走和点 × 完全相同的流程——
+  // 先落盘、成功再退出。这样 Alt+F4 不会绕开保存。
+  const u4 = await listen("notes://close-requested", () => {
+    void notesStore.closeNotes();
+  });
+  // 后台把 catcher 文本导成卡片之后，Rust 发一次这个，让列表刷新。
+  // 事件可能早于监听挂上（那时 init 收尾会对一次账，见 notesStore.reconcileImport）。
+  const u5 = await listen("notes://catcher-imported", () => {
+    void notesStore.refreshAfterImport();
+  });
+  unlisteners = [u1, u2, u3, u4, u5];
 }
